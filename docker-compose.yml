@@ -1,0 +1,82 @@
+# Finance-IA Revisor de Tom & LGPD - Docker Compose
+# Sistema HTTP para revisão automatizada de conteúdo com IA
+
+version: '3.8'
+
+services:
+  finance-ia-reviewer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: finance-ia-reviewer
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      # Configurações da aplicação
+      - FLASK_ENV=production
+      - PORT=5000
+      - DEBUG=false
+      
+      # Chaves de API (definir no .env)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - AUTH_TOKEN=${AUTH_TOKEN:-finance-ia-reviewer-token}
+      
+      # Configurações de logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      
+      # Configurações do Gunicorn
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-2}
+      - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
+    
+    volumes:
+      # Logs persistentes (opcional)
+      - ./logs:/app/logs
+    
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Limites de recursos
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    
+    # Rede personalizada
+    networks:
+      - finance-ia-network
+
+  # Nginx como proxy reverso (opcional)
+  nginx:
+    image: nginx:alpine
+    container_name: finance-ia-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro  # Para certificados SSL
+    depends_on:
+      - finance-ia-reviewer
+    networks:
+      - finance-ia-network
+    profiles:
+      - with-nginx  # Ativar com: docker-compose --profile with-nginx up
+
+volumes:
+  logs:
+    driver: local
+
+networks:
+  finance-ia-network:
+    driver: bridge
+    name: finance-ia-network

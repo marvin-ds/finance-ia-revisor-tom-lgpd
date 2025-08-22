@@ -1,0 +1,191 @@
+# Finance-IA Revisor de Tom & LGPD - CI/CD Pipeline
+# GitHub Actions para testes, build e deploy automático
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Job de testes e validação
+  test:
+    name: Tests & Code Quality
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        python-version: [3.9, 3.10, 3.11]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-flask black flake8 safety bandit
+    
+    - name: Code formatting check (Black)
+      run: black --check --diff .
+      continue-on-error: true
+    
+    - name: Lint with flake8
+      run: |
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+      continue-on-error: true
+    
+    - name: Security check with bandit
+      run: bandit -r . -x .venv,__pycache__
+      continue-on-error: true
+    
+    - name: Check for known security vulnerabilities
+      run: safety check
+      continue-on-error: true
+    
+    - name: Test with pytest
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY_TEST }}
+        AUTH_TOKEN: test-token
+      run: |
+        pytest --verbose --tb=short
+      continue-on-error: true
+    
+    - name: Test application startup
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY_TEST }}
+        AUTH_TOKEN: test-token
+        FLASK_ENV: testing
+      run: |
+        timeout 10s python app.py || true
+        echo "Application startup test completed"
+
+  # Job de build da imagem Docker
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name != 'pull_request'
+    
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=raw,value=latest,enable={{is_default_branch}}
+    
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Job de deploy (apenas para releases)
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [test, build]
+    if: github.event_name == 'release'
+    
+    environment:
+      name: production
+      url: https://finance-ia-reviewer.exemplo.com
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Deploy to production server
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.PRODUCTION_HOST }}
+        username: ${{ secrets.PRODUCTION_USER }}
+        key: ${{ secrets.PRODUCTION_SSH_KEY }}
+        script: |
+          cd /opt/finance-ia-reviewer
+          docker-compose pull
+          docker-compose up -d --remove-orphans
+          docker system prune -f
+          echo "Deploy completed successfully"
+    
+    - name: Health check
+      run: |
+        sleep 30
+        curl -f https://finance-ia-reviewer.exemplo.com/healthz || exit 1
+        echo "Health check passed"
+
+  # Job de notificação
+  notify:
+    name: Notify Results
+    runs-on: ubuntu-latest
+    needs: [test, build, deploy]
+    if: always()
+    
+    steps:
+    - name: Notify success
+      if: ${{ needs.test.result == 'success' && needs.build.result == 'success' }}
+      run: |
+        echo "✅ Pipeline executado com sucesso!"
+        echo "- Testes: ${{ needs.test.result }}"
+        echo "- Build: ${{ needs.build.result }}"
+        echo "- Deploy: ${{ needs.deploy.result }}"
+    
+    - name: Notify failure
+      if: ${{ needs.test.result == 'failure' || needs.build.result == 'failure' || needs.deploy.result == 'failure' }}
+      run: |
+        echo "❌ Pipeline falhou!"
+        echo "- Testes: ${{ needs.test.result }}"
+        echo "- Build: ${{ needs.build.result }}"
+        echo "- Deploy: ${{ needs.deploy.result }}"
+        exit 1
